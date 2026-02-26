@@ -50,6 +50,187 @@ void JSONObject::initialize(Realm& realm)
     define_direct_property(vm.well_known_symbol_to_string_tag(), PrimitiveString::create(vm, "JSON"_string), Attribute::Configurable);
 }
 
+static void write_indent(StringBuilder& builder, StringView gap, size_t depth)
+{
+    for (size_t i = 0; i < depth; ++i)
+        builder.append(gap);
+}
+/// adjust costs so JSON.stringify(plain data) is faster, with minimal drawback on the other calls
+// Fast-path helper: serialize a value that is known to be plain data.
+// Returns true if the value was written, false if it must be omitted (undefined/function/symbol
+// in object context). Throws on BigInt. Falls back to the full path only for values that truly
+// require it (e.g. toJSON, boxed primitives, exotic objects).
+ThrowCompletionOr<bool> JSONObject::serialize_json_property_fast(VM& vm, StringifyState& state, Value value)
+{
+    // Scalar fast lanes — no object access at all.
+    if (value.is_null()) {
+        state.builder.append("null"sv);
+        return true;
+    }
+    if (value.is_boolean()) {
+        state.builder.append(value.as_bool() ? "true"sv : "false"sv);
+        return true;
+    }
+    if (value.is_number()) {
+        if (value.is_finite_number())
+            number_to_string(state.builder, value.as_double());
+        else
+            state.builder.append("null"sv);
+        return true;
+    }
+    if (value.is_string()) {
+        quote_json_string(state.builder, value.as_string().utf16_string_view());
+        return true;
+    }
+    // undefined, symbol -> omit from objects; callers write "null" for array slots.
+    if (value.is_undefined() || value.is_symbol())
+        return false;
+    // BigInt always throws, same as the full path step 10.
+    if (value.is_bigint())
+        return vm.throw_completion<TypeError>(ErrorType::JsonBigInt);
+    // Callables are omitted from objects and become null in arrays; signal omit and let
+    // the array fast path handle the null substitution.
+    if (value.is_function())
+        return false;
+
+    VERIFY(value.is_object());
+    auto& object = value.as_object();
+
+    // Bail on anything with exotic [[Get]] behaviour (Proxy, Arguments, TypedArray, etc.).
+    if (object.may_interfere_with_indexed_property_access())
+        return false;
+
+    // Bail on boxed primitives and RawJSONObject — the full path unboxes/handles them.
+    if (is<NumberObject>(object) || is<StringObject>(object) || is<BooleanObject>(object)
+        || is<BigIntObject>(object) || is<RawJSONObject>(object))
+        return false;
+
+    // Only accept objects whose prototype is exactly %Object.prototype% or %Array.prototype%.
+    // This guarantees no user-defined toJSON anywhere in the chain and no custom [[OwnPropertyKeys]].
+    auto const* proto = object.shape().prototype();
+    auto& intrinsics = vm.current_realm()->intrinsics();
+    bool const is_plain_array = (proto == intrinsics.array_prototype().ptr());
+    if (!is_plain_array && proto != intrinsics.object_prototype().ptr())
+        return false;
+
+    // Plain objects must not have indexed properties — they would appear in enumeration
+    // order that get_direct() does not account for.
+    if (!is_plain_array && !object.indexed_properties().is_empty())
+        return false;
+
+    if (is_plain_array)
+        TRY(serialize_json_array_fast(vm, state, object));
+    else
+        TRY(serialize_json_object_fast(vm, state, object));
+    return true;
+}
+
+ThrowCompletionOr<void> JSONObject::serialize_json_object_fast(VM& vm, StringifyState& state, Object& object)
+{
+    if (state.seen_objects.contains(&object))
+        return vm.throw_completion<TypeError>(ErrorType::JsonCircular);
+    state.seen_objects.set(&object);
+
+    auto& builder = state.builder;
+    builder.append('{');
+    size_t const position_after_open_brace = builder.length();
+    bool first = true;
+
+    for (auto const& [key, metadata] : object.shape().property_table()) {
+        // Mirror serialize_json_object: skip symbols and non-enumerable properties.
+        if (key.is_symbol())
+            continue;
+        if (!metadata.attributes.is_enumerable())
+            continue;
+
+        auto const value = object.get_direct(metadata.offset);
+
+        // undefined, symbol, and function values are omitted from JSON objects.
+        if (value.is_undefined() || value.is_symbol() || value.is_function())
+            continue;
+
+        size_t const mark = builder.length();
+        if (!first)
+            builder.append(',');
+        quote_json_string(builder, key.as_string().to_utf16_string());
+        builder.append(':');
+
+        bool wrote_value = TRY(serialize_json_property_fast(vm, state, value));
+        if (!wrote_value) {
+            // Value was omitted (should not happen for the types we skipped above,
+            // but handle defensively by rolling back the key we just wrote).
+            builder.trim(builder.length() - mark);
+            continue;
+        }
+        first = false;
+    }
+
+    if (builder.length() > position_after_open_brace && !state.gap.is_empty()) {
+        builder.append('\n');
+        write_indent(builder, state.gap, state.indent_depth);
+    }
+    builder.append('}');
+
+    state.seen_objects.remove(&object);
+    return {};
+}
+
+ThrowCompletionOr<void> JSONObject::serialize_json_array_fast(VM& vm, StringifyState& state, Object& object)
+{
+    if (state.seen_objects.contains(&object))
+        return vm.throw_completion<TypeError>(ErrorType::JsonCircular);
+    state.seen_objects.set(&object);
+
+    auto& builder = state.builder;
+    auto& indexed = object.indexed_properties();
+    size_t const length = indexed.array_like_size();
+
+    builder.append('[');
+
+    // Simple (dense) storage: iterate the backing Vector<Value> directly with no virtual calls.
+    if (indexed.storage() != nullptr && indexed.storage()->is_simple_storage()) {
+        auto const& elements = static_cast<SimpleIndexedPropertyStorage const&>(*indexed.storage()).elements();
+        for (size_t i = 0; i < length; ++i) {
+            if (i > 0)
+                builder.append(',');
+            auto const element = (i < elements.size()) ? elements[i] : Value {};
+            // Holes, undefined, and functions become "null" in JSON arrays.
+            if (element.is_special_empty_value() || element.is_undefined() || element.is_function()) {
+                builder.append("null"sv);
+                continue;
+            }
+            bool wrote_value = TRY(serialize_json_property_fast(vm, state, element));
+            if (!wrote_value)
+                builder.append("null"sv);
+        }
+    } else {
+        // Sparse or null storage — fall back to indexed get per element.
+        // Still faster than the full path because we skip toJSON and replacer checks.
+        for (size_t i = 0; i < length; ++i) {
+            if (i > 0)
+                builder.append(',');
+            auto maybe_element = indexed.get(i);
+            if (!maybe_element.has_value()) {
+                builder.append("null"sv);
+                continue;
+            }
+            auto const element = maybe_element->value;
+            if (element.is_undefined() || element.is_function()) {
+                builder.append("null"sv);
+                continue;
+            }
+            bool wrote_value = TRY(serialize_json_property_fast(vm, state, element));
+            if (!wrote_value)
+                builder.append("null"sv);
+        }
+    }
+
+    builder.append(']');
+
+    state.seen_objects.remove(&object);
+    return {};
+}
+
 // 25.5.2 JSON.stringify ( value [ , replacer [ , space ] ] ), https://tc39.es/ecma262/#sec-json.stringify
 ThrowCompletionOr<Optional<String>> JSONObject::stringify_impl(VM& vm, Value value, Value replacer, Value space)
 {
@@ -107,6 +288,13 @@ ThrowCompletionOr<Optional<String>> JSONObject::stringify_impl(VM& vm, Value val
             state.gap = MUST(string.substring_from_byte_offset(0, 10));
     } else {
         state.gap = String {};
+    }
+    if (!state.replacer_function && !state.property_list.has_value() && state.gap.is_empty()) {
+        size_t const fast_path_start = state.builder.length();
+        auto result = serialize_json_property_fast(vm, state, value);
+        if (!result.is_error() && result.value())
+            return state.builder.to_string_without_validation();
+        state.builder.trim(state.builder.length() - fast_path_start);
     }
 
     auto wrapper = Object::create(realm, realm.intrinsics().object_prototype());
@@ -250,12 +438,6 @@ ThrowCompletionOr<bool> JSONObject::serialize_json_property(VM& vm, StringifySta
 
     // 12. Return undefined.
     return false;
-}
-
-static void write_indent(StringBuilder& builder, StringView gap, size_t depth)
-{
-    for (size_t i = 0; i < depth; ++i)
-        builder.append(gap);
 }
 
 // 25.5.2.4 SerializeJSONObject ( state, value ), https://tc39.es/ecma262/#sec-serializejsonobject

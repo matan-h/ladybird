@@ -41,6 +41,11 @@ private:
     static ThrowCompletionOr<bool> serialize_json_property(VM&, StringifyState&, PropertyKey const& key, Object* holder);
     static ThrowCompletionOr<void> serialize_json_object(VM&, StringifyState&, Object&);
     static ThrowCompletionOr<void> serialize_json_array(VM&, StringifyState&, Object&);
+
+    static ThrowCompletionOr<bool> serialize_json_property_fast(VM&, StringifyState&, Value value);
+    static ThrowCompletionOr<void> serialize_json_object_fast(VM&, StringifyState&, Object&);
+    static ThrowCompletionOr<void> serialize_json_array_fast(VM&, StringifyState&, Object&);
+
     static void quote_json_string(StringBuilder&, Utf16View const&);
 
     // Parse helpers
