@@ -103,7 +103,31 @@ void number_to_string(StringBuilder& builder, double d, NumberToStringMode mode)
         builder.append("-Infinity"sv);
         return;
     }
-
+    // fast path: for safe integers
+    if (d == std::floor(d)) {
+        constexpr double MAX_SAFE = 9007199254740991.0;  // Number.MAX_SAFE_INTEGER.
+        constexpr double MIN_SAFE = -9007199254740991.0;
+        if (d >= MIN_SAFE && d <= MAX_SAFE) {
+            i64 value = static_cast<i64>(d);
+            if (value == 0) {
+                builder.append('0');
+                return;
+            }
+            if (value < 0) {
+                builder.append('-');
+                value = -value;
+            }
+            char buffer[32];
+            size_t len = 0;
+            while (value > 0) {
+                buffer[len++] = '0' + static_cast<char>(value % 10);
+                value /= 10;
+            }
+            while (len > 0)
+                builder.append(buffer[--len]);
+            return;
+        }
+    }
     // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k, 𝔽(s × radix ^ (n - k)) is x, and
     //    k is as small as possible. Note that k is the number of digits in the representation of s using radix radix,
     //    that s is not divisible by radix, and that the least significant digit of s is not necessarily uniquely
