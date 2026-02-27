@@ -67,6 +67,7 @@ public:
     void append_repeated(Utf16View const&, size_t);
     void append_escaped_for_json(StringView);
     void append_as_lowercase(char);
+    void append_utf16_as_ascii(Utf16View const& view);
     void append_ascii_without_validation(ReadonlyBytes);
 
     template<typename... Parameters>

@@ -108,25 +108,26 @@ void number_to_string(StringBuilder& builder, double d, NumberToStringMode mode)
         constexpr double MAX_SAFE = 9007199254740991.0;  // Number.MAX_SAFE_INTEGER.
         constexpr double MIN_SAFE = -9007199254740991.0;
         if (d >= MIN_SAFE && d <= MAX_SAFE) {
-            i64 value = static_cast<i64>(d);
-            if (value == 0) {
-                builder.append('0');
-                return;
-            }
-            if (value < 0) {
-                builder.append('-');
-                value = -value;
-            }
-            char buffer[32];
-            size_t len = 0;
-            while (value > 0) {
-                buffer[len++] = '0' + static_cast<char>(value % 10);
-                value /= 10;
-            }
-            while (len > 0)
-                builder.append(buffer[--len]);
+        i64 value = static_cast<i64>(d);
+        if (value == 0) {
+            builder.append('0');
             return;
         }
+        bool negative = value < 0;
+        if (negative) value = -value;
+
+        char buffer[21]; // Max length of i64 is 20 digits + sign
+        char* ptr = buffer + 21;
+        while (value > 0) {
+            *--ptr = '0' + static_cast<char>(value % 10);
+            value /= 10;
+        }
+        if (negative) *--ptr = '-';
+
+        // Use the StringView overload to trigger a single internal will_append and memcpy
+        builder.append(StringView { ptr, static_cast<size_t>((buffer + 21) - ptr) });
+        return;
+    }
     }
     // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k, 𝔽(s × radix ^ (n - k)) is x, and
     //    k is as small as possible. Note that k is the number of digits in the representation of s using radix radix,

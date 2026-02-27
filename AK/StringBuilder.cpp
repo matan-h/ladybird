@@ -142,7 +142,20 @@ ErrorOr<void> StringBuilder::try_append(StringView string)
 
     return {};
 }
+void StringBuilder::append_utf16_as_ascii(Utf16View const& view)
+{
+    size_t n = view.length_in_code_units();
+    if (n == 0) return;
 
+    // Check capacity once
+    MUST(will_append(n));
+
+    u8* dest = m_buffer.data() + m_buffer.size();
+    for (size_t i = 0; i < n; ++i) {
+        dest[i] = static_cast<u8>(view.code_unit_at(i));
+    }
+    m_buffer.set_size(m_buffer.size() + n);
+}
 void StringBuilder::append_ascii_without_validation(ReadonlyBytes string)
 {
     MUST(try_append_ascii_without_validation(string));

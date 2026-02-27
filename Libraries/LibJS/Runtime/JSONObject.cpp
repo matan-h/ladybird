@@ -564,6 +564,25 @@ void JSONObject::quote_json_string(StringBuilder& builder, Utf16View const& stri
     // 1. Let product be the String value consisting solely of the code unit 0x0022 (QUOTATION MARK).
     builder.append('"');
 
+    // fast path: can we safely memcpy this? (most json keys does not need escape)
+    bool needs_escaping = false;
+    for (u16 c : string) {
+        if (c < 0x20 || c == '"' || c == '\\' || c >= 0x80) {
+            needs_escaping = true;
+            break;
+        }
+    }
+
+    if (!needs_escaping) {
+        auto length = string.length_in_code_units();
+if (length > 0) {
+            builder.append_utf16_as_ascii(string);
+        }
+
+        builder.append('"');
+        return;
+    }
+
     // 2. For each code point C of StringToCodePoints(value), do
     for (auto code_point : string) {
         // a. If C is listed in the "Code Point" column of Table 70, then
